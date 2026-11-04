@@ -5,12 +5,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: 17 }
-      - uses: android-actions/setup-android@v3
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Android SDK (предустановлен на раннере)
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;34.0.0"
+
       - uses: gradle/actions/setup-gradle@v3
-        with: { gradle-version: 8.5 }
+        with:
+          gradle-version: 8.5
+
       - run: gradle assembleDebug --no-daemon
+
       - uses: actions/upload-artifact@v4
         with:
           name: PianoTeacher-debug-apk

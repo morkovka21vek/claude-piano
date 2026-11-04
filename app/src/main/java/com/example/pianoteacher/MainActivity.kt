@@ -40,6 +40,7 @@ class Player(
     private class Ev(val t: Long, val on: Boolean, val n: Note, val step: Int)
 
     private val events: List<Ev>
+    private val initialStep = from
     @Volatile private var stopped = false
     private var thread: Thread? = null
 
@@ -60,6 +61,7 @@ class Player(
 
     private fun loop() {
         val active = HashMap<Int, Note>()
+        var currentStep = initialStep
         val t0 = SystemClock.uptimeMillis()
         try {
             for (e in events) {
@@ -69,7 +71,9 @@ class Player(
                 if (e.on) { send(0x90, e.n.pitch, maxOf(e.n.vel, 40)); active[e.n.pitch] = e.n }
                 else { send(0x80, e.n.pitch, 0); if (active[e.n.pitch] === e.n) active.remove(e.n.pitch) }
                 val snap = HashMap<Int, Note>(active)
-                val st = e.step
+                // Завершение длинной ноты предыдущего шага не должно откатывать курсор.
+                if (e.on) currentStep = maxOf(currentStep, e.step)
+                val st = currentStep
                 ui.post { if (!stopped) onState(st, snap) }
             }
         } catch (ex: InterruptedException) {
@@ -314,7 +318,22 @@ class MainActivity : Activity() {
     private fun startPlayer(from: Int) {
         player?.stop()
         player = Player(steps, from, speed(), { s, a, v -> sendMidi(s, a, v) }, ui,
-            { i, act -> idx = i; playing = act; refresh() },
+            { i, act ->
+                // NOTE_OFF от предыдущего шага может прийти позже NOTE_ON следующего.
+                // Позиция курсора монотонна, а активные ноты обновляются на каждом MIDI-событии.
+                val nextIndex = maxOf(idx, i)
+                val positionChanged = nextIndex != idx
+                idx = nextIndex
+                playing = act
+                if (positionChanged) {
+                    refresh()
+                } else {
+                    kb.targets = act
+                    hands.targets = act
+                    kb.invalidate()
+                    hands.invalidate()
+                }
+            },
             { mode = Mode.NONE; idx = 0; playing = emptyMap(); player = null; refresh() })
         player?.start()
     }

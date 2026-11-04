@@ -254,58 +254,172 @@ class KeyboardView(ctx: Context) : View(ctx) {
     }
 }
 
-/** Контур двух рук: подсвечены пальцы, которые нужно использовать. */
+/**
+ * Схематичные, но анатомически читаемые руки сверху: ладонь, запястье,
+ * пять отдельных пальцев и ногти. Подсветка относится только к активным пальцам.
+ */
 class HandsView(ctx: Context) : View(ctx) {
     var targets: Map<Int, Note> = emptyMap()
     var showFingers = true
 
     private val d = resources.displayMetrics.density
-    private val p = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val r = RectF()
-    private val len = floatArrayOf(0f, 0.30f, 0.46f, 0.52f, 0.46f, 0.34f) // по номеру пальца, доли высоты
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val bounds = RectF()
+    private val skin = 0xFFF0C9A8.toInt()
+    private val skinShade = 0xFFD9A987.toInt()
+    private val outline = 0xFF8C6956.toInt()
+    private val nail = 0xFFFFE9DC.toInt()
+    private val mutedText = 0xFF725F55.toInt()
 
     override fun onDraw(c: Canvas) {
-        c.drawColor(0xFFF4F1E8.toInt())
-        val act = HashMap<Int, HashSet<Int>>()
-        if (showFingers) for (n in targets.values) if (n.finger in 1..5) act.getOrPut(n.hand) { HashSet() }.add(n.finger)
-        val w = width / 2f
-        drawHand(c, 0f, w, 2, act[2] ?: emptySet<Int>(), "Левая")
-        drawHand(c, w, w, 1, act[1] ?: emptySet<Int>(), "Правая")
+        c.drawColor(0xFFF5F2EC.toInt())
+        val active = HashMap<Int, HashSet<Int>>()
+        if (showFingers) {
+            for (note in targets.values) {
+                if (note.finger in 1..5) {
+                    active.getOrPut(note.hand) { HashSet() }.add(note.finger)
+                }
+            }
+        }
+        val half = width / 2f
+        drawHand(c, 0f, half, isLeftHand = true, active[2] ?: emptySet())
+        drawHand(c, half, half, isLeftHand = false, active[1] ?: emptySet())
+
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 1f * d
+        paint.color = 0xFFE3DDD3.toInt()
+        c.drawLine(half, 12f * d, half, height - 12f * d, paint)
     }
 
-    private fun drawHand(c: Canvas, x0: Float, w: Float, hand: Int, active: Set<Int>, name: String) {
-        val hh = height.toFloat()
-        val hw = w * 0.88f
-        val left = x0 + (w - hw) / 2
-        val col = hw / 5f
-        val fw = col * 0.82f
-        val palmTop = hh * 0.55f
-        val color = if (hand == 2) ORANGE else BLUE
+    private fun drawHand(
+        canvas: Canvas,
+        x: Float,
+        panelWidth: Float,
+        isLeftHand: Boolean,
+        active: Set<Int>
+    ) {
+        val panelHeight = height.toFloat()
+        if (panelWidth <= 0f || panelHeight <= 0f) return
 
-        r.set(left, palmTop, left + hw, hh * 0.95f)
-        p.style = Paint.Style.FILL; p.color = Color.WHITE
-        c.drawRoundRect(r, 12 * d, 12 * d, p)
-        p.style = Paint.Style.STROKE; p.strokeWidth = 2 * d; p.color = 0xFF777777.toInt()
-        c.drawRoundRect(r, 12 * d, 12 * d, p)
-        p.style = Paint.Style.FILL; p.color = 0xFF999999.toInt(); p.textAlign = Paint.Align.CENTER
-        p.textSize = 11 * d; p.typeface = Typeface.DEFAULT
-        c.drawText(name, left + hw / 2, hh * 0.80f, p)
+        val save = canvas.save()
+        canvas.translate(x, 0f)
 
-        for (k in 0 until 5) {
-            val f = if (hand == 1) k + 1 else 5 - k
-            val fl = left + k * col + (col - fw) / 2
-            val base = palmTop + (if (f == 1) 0.14f * hh else 0.03f * hh)
-            val top = base - len[f] * hh
-            r.set(fl, top, fl + fw, base)
-            val on = f in active
-            p.style = Paint.Style.FILL; p.color = if (on) color else Color.WHITE
-            c.drawRoundRect(r, fw / 2, fw / 2, p)
-            p.style = Paint.Style.STROKE; p.strokeWidth = 2 * d; p.color = if (on) color else 0xFF777777.toInt()
-            c.drawRoundRect(r, fw / 2, fw / 2, p)
-            p.style = Paint.Style.FILL; p.typeface = Typeface.DEFAULT_BOLD
-            p.textSize = fw * 0.6f
-            p.color = if (on) Color.WHITE else 0xFF999999.toInt()
-            c.drawText(f.toString(), fl + fw / 2, top + fw * 0.95f, p)
+        // Нормализованная геометрия подстраивается под узкие и широкие панели.
+        val handWidth = panelWidth * 0.78f
+        val scale = minOf(handWidth / 180f, panelHeight / 380f)
+        val cx = panelWidth / 2f
+        val top = maxOf(6f * d, (panelHeight - 370f * scale) / 2f)
+        canvas.translate(cx - 90f * scale, top)
+        canvas.scale(scale, scale)
+
+        val activeColor = if (isLeftHand) ORANGE else BLUE
+        // Координаты четырёх длинных пальцев: от указательного к мизинцу.
+        val fingerTops = floatArrayOf(45f, 20f, 42f, 78f)
+        val fingerWidths = floatArrayOf(27f, 28f, 27f, 25f)
+        val palmTop = 166f
+        val palmBottom = 286f
+
+        // Запястье.
+        bounds.set(54f, 250f, 126f, 326f)
+        paint.style = Paint.Style.FILL
+        paint.color = skinShade
+        canvas.drawRoundRect(bounds, 23f, 23f, paint)
+        bounds.set(59f, 247f, 121f, 323f)
+        paint.color = skin
+        canvas.drawRoundRect(bounds, 20f, 20f, paint)
+
+        // Ладонь с плавными плечами и слегка сужающимся запястьем.
+        val palm = android.graphics.Path().apply {
+            moveTo(28f, palmTop + 25f)
+            cubicTo(28f, palmTop - 2f, 43f, palmTop - 8f, 58f, palmTop)
+            cubicTo(76f, palmTop + 10f, 104f, palmTop + 10f, 122f, palmTop)
+            cubicTo(140f, palmTop - 8f, 155f, palmTop - 2f, 152f, palmTop + 25f)
+            lineTo(143f, palmBottom - 18f)
+            cubicTo(139f, palmBottom + 8f, 119f, palmBottom + 14f, 90f, palmBottom + 14f)
+            cubicTo(61f, palmBottom + 14f, 41f, palmBottom + 8f, 37f, palmBottom - 18f)
+            close()
         }
+        paint.color = skinShade
+        canvas.drawPath(palm, paint)
+        canvas.save()
+        canvas.translate(0f, -2f)
+        paint.color = skin
+        canvas.drawPath(palm, paint)
+        canvas.restore()
+
+        // Четыре пальца. Нумерация всегда анатомическая: 2 — указательный,
+        // 3 — средний, 4 — безымянный, 5 — мизинец.
+        for (slot in 0..3) {
+            val finger = slot + 2
+            val center = if (isLeftHand) 124f - slot * 34f else 56f + slot * 34f
+            val topY = fingerTops[slot]
+            val fw = fingerWidths[slot]
+            val isActive = finger in active
+            val color = if (isActive) activeColor else skin
+
+            bounds.set(center - fw / 2f, topY, center + fw / 2f, 191f)
+            paint.style = Paint.Style.FILL
+            paint.color = skinShade
+            canvas.drawRoundRect(bounds, fw / 2f, fw / 2f, paint)
+            bounds.inset(1.5f, 0f)
+            paint.color = color
+            canvas.drawRoundRect(bounds, fw / 2f, fw / 2f, paint)
+
+            // Ногтевая пластина.
+            bounds.set(center - fw * 0.27f, topY + 9f, center + fw * 0.27f, topY + 28f)
+            paint.color = if (isActive) 0xFFDCE8FF.toInt() else nail
+            canvas.drawRoundRect(bounds, 8f, 8f, paint)
+
+            bounds.set(center - fw / 2f + 1f, topY + 1f, center + fw / 2f - 1f, 191f)
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = 1.5f
+            paint.color = outline
+            canvas.drawRoundRect(bounds, fw / 2f, fw / 2f, paint)
+            paint.style = Paint.Style.FILL
+
+            // Номер пальца на нижней фаланге.
+            paint.textAlign = Paint.Align.CENTER
+            paint.typeface = Typeface.DEFAULT_BOLD
+            paint.textSize = 17f
+            paint.color = if (isActive) Color.WHITE else mutedText
+            canvas.drawText(finger.toString(), center, 174f, paint)
+        }
+
+        // Большой палец расположен с внешней стороны и направлен по диагонали.
+        // Для левой руки он справа, для правой — слева.
+        val thumbCenterX = if (isLeftHand) 151f else 29f
+        val thumbAngle = if (isLeftHand) 38f else -38f
+        canvas.save()
+        canvas.rotate(thumbAngle, thumbCenterX, 181f)
+        bounds.set(thumbCenterX - 15f, 111f, thumbCenterX + 15f, 211f)
+        paint.color = skinShade
+        canvas.drawRoundRect(bounds, 15f, 15f, paint)
+        bounds.inset(1.5f, 0f)
+        paint.color = if (1 in active) activeColor else skin
+        canvas.drawRoundRect(bounds, 14f, 14f, paint)
+        bounds.set(thumbCenterX - 8f, 119f, thumbCenterX + 8f, 140f)
+        paint.color = if (1 in active) 0xFFDCE8FF.toInt() else nail
+        canvas.drawRoundRect(bounds, 7f, 7f, paint)
+        paint.textAlign = Paint.Align.CENTER
+        paint.typeface = Typeface.DEFAULT_BOLD
+        paint.textSize = 17f
+        paint.color = if (1 in active) Color.WHITE else mutedText
+        canvas.drawText("1", thumbCenterX, 184f, paint)
+        canvas.restore()
+
+        // Лёгкий контур ладони поверх пальцев объединяет силуэт.
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 2f
+        paint.color = outline
+        canvas.drawPath(palm, paint)
+
+        paint.style = Paint.Style.FILL
+        paint.textAlign = Paint.Align.CENTER
+        paint.typeface = Typeface.DEFAULT
+        paint.textSize = 14f
+        paint.color = mutedText
+        canvas.drawText(if (isLeftHand) "ЛЕВАЯ" else "ПРАВАЯ", 90f, 355f, paint)
+
+        canvas.restoreToCount(save)
     }
 }

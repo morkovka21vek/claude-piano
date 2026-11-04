@@ -3,7 +3,6 @@ package com.example.pianoteacher
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.graphics.Color
 import android.media.midi.MidiDevice
 import android.media.midi.MidiDeviceInfo
 import android.media.midi.MidiInputPort
@@ -32,7 +31,7 @@ enum class Mode { NONE, LISTEN, WATCH, REMEMBER }
 
 /** Проигрывает шаги урока на пианино (через MIDI OUT) и/или на встроенном синтезаторе. */
 class Player(
-    steps: List<Step>, speed: Float,
+    steps: List<Step>, from: Int, speed: Float,
     private val send: (Int, Int, Int) -> Unit,
     private val ui: Handler,
     private val onState: (Int, Map<Int, Note>) -> Unit,
@@ -46,10 +45,10 @@ class Player(
 
     init {
         val l = ArrayList<Ev>()
-        val base = if (steps.isEmpty()) 0L else steps[0].startMs
-        for ((i, s) in steps.withIndex()) for (n in s.notes) {
-            val a = ((n.startMs - base) / speed).toLong() + 600
-            val b = ((maxOf(n.endMs, n.startMs + 60) - base) / speed).toLong() + 600
+        val base = if (from in steps.indices) steps[from].startMs else 0L
+        for (i in from until steps.size) for (n in steps[i].notes) {
+            val a = ((n.startMs - base) / speed).toLong() + 400
+            val b = ((maxOf(n.endMs, n.startMs + 60) - base) / speed).toLong() + 400
             l.add(Ev(a, true, n, i)); l.add(Ev(b, false, n, i))
         }
         events = l.sortedWith(compareBy({ it.t }, { if (it.on) 1 else 0 }))
@@ -80,6 +79,9 @@ class Player(
     }
 }
 
+/** Сколько лишних (не входящих в шаг) клавиш может быть нажато одновременно с нужными. */
+const val EXTRA_ALLOWED = 1
+
 class MainActivity : Activity() {
     private val ui = Handler(Looper.getMainLooper())
     private var midi: MidiManager? = null
@@ -104,18 +106,22 @@ class MainActivity : Activity() {
     private var mode = Mode.NONE
     private var idx = 0
     private var mistakes = 0
-    private val held = HashSet<Int>()
-    private val wrong = HashSet<Int>()
-    private val done = HashSet<Int>()
+    private val held = HashSet<Int>()      // клавиши, которые зажаты сейчас
+    private val armed = HashSet<Int>()     // нажаты уже после начала текущего шага и всё ещё зажаты
+    private val wrong = HashSet<Int>()     // зажатые клавиши, которые были нажаты ошибочно
     private var playing: Map<Int, Note> = emptyMap()
     private var player: Player? = null
+    private var seekGuard = false
+    private var resumeAfterSeek = false
 
     private lateinit var staff: StaffView
     private lateinit var kb: KeyboardView
+    private lateinit var hands: HandsView
     private lateinit var info: TextView
     private lateinit var spinDev: Spinner
     private lateinit var spinHands: Spinner
     private lateinit var seek: SeekBar
+    private lateinit var posSeek: SeekBar
     private lateinit var tempoLabel: TextView
     private lateinit var cbShowNotes: CheckBox
     private lateinit var btnListen: Button
@@ -130,69 +136,97 @@ class MainActivity : Activity() {
         val d = resources.displayMetrics.density
         fun dp(v: Int) = (v * d).toInt()
         fun btn(t: String, f: () -> Unit) = Button(this).apply {
-            text = t; setAllCaps(false); setOnClickListener { f() }
+            text = t; setAllCaps(false); textSize = 13f
+            minWidth = 0; minimumWidth = 0; minHeight = 0; minimumHeight = 0
+            setPadding(dp(10), dp(7), dp(10), dp(7))
+            setOnClickListener { f() }
         }
         fun row() = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = android.view.Gravity.CENTER_VERTICAL }
+        fun small(t: String) = TextView(this).apply { text = t; textSize = 13f }
+        fun cb(t: String, f: (Boolean) -> Unit) = CheckBox(this).apply {
+            text = t; textSize = 13f; setOnCheckedChangeListener { _, c -> f(c) }
+        }
+        val grow = { LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) }
 
-        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(8), dp(4), dp(8), dp(4)) }
+        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(8), dp(2), dp(8), dp(2)) }
 
         val r1 = row()
         r1.addView(btn("Открыть MIDI") { pick(1) })
         r1.addView(btn("Аппликатура (pianoplayer)") { pick(2) })
-        r1.addView(TextView(this).apply { text = "  MIDI: " })
+        r1.addView(small("  MIDI: "))
         spinDev = Spinner(this)
-        r1.addView(spinDev, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        r1.addView(spinDev, grow())
+        r1.addView(cb("Картинка рук") { hands.visibility = if (it) View.VISIBLE else View.GONE })
+        r1.addView(cb("Звук на планшете") { tabletSound = it })
         root.addView(r1)
 
         val r2 = row()
-        btnListen = btn("1 · Слушай (LISTEN, 21)") { startMode(Mode.LISTEN) }
-        btnWatch = btn("2 · Смотри (WATCH, 22)") { startMode(Mode.WATCH) }
-        btnRemember = btn("3 · Вспоминай (REMEMBER, 23)") { startMode(Mode.REMEMBER) }
+        btnListen = btn("1 · Слушай") { startMode(Mode.LISTEN) }
+        btnWatch = btn("2 · Смотри") { startMode(Mode.WATCH) }
+        btnRemember = btn("3 · Вспоминай") { startMode(Mode.REMEMBER) }
         r2.addView(btnListen); r2.addView(btnWatch); r2.addView(btnRemember)
         r2.addView(btn("■ Стоп") { stopAll() })
-        root.addView(r2)
-
-        val r3 = row()
-        r3.addView(TextView(this).apply { text = "Руки: " })
+        r2.addView(btn("⏮ В начало") { setPosition(0) })
+        r2.addView(small("  Партия: "))
         spinHands = Spinner(this)
         spinHands.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item,
-            listOf("Обе", "Правая", "Левая"))
+            listOf("Обе руки", "Правая", "Левая"))
         spinHands.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) { rebuild() }
             override fun onNothingSelected(p: AdapterView<*>?) {}
         }
-        r3.addView(spinHands)
-        tempoLabel = TextView(this).apply { text = "   Темп 100% " }
-        r3.addView(tempoLabel)
+        r2.addView(spinHands)
+        tempoLabel = small("  Темп 100% ")
+        r2.addView(tempoLabel)
         seek = SeekBar(this).apply {
             max = 100; progress = 60
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(s: SeekBar?, v: Int, u: Boolean) {
-                    tempoLabel.text = "   Темп ${(speed() * 100).toInt()}% "
+                    tempoLabel.text = "  Темп ${(speed() * 100).toInt()}% "
                 }
                 override fun onStartTrackingTouch(s: SeekBar?) {}
                 override fun onStopTrackingTouch(s: SeekBar?) {}
             })
         }
-        r3.addView(seek, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        r3.addView(CheckBox(this).apply {
-            text = "Звук на планшете"
-            setOnCheckedChangeListener { _, c -> tabletSound = c }
-        })
-        cbShowNotes = CheckBox(this).apply {
-            text = "Ноты в «Вспоминай»"
-            setOnCheckedChangeListener { _, _ -> refresh() }
+        r2.addView(seek, grow())
+        root.addView(r2)
+
+        val r3 = row()
+        r3.addView(small("Позиция: "))
+        posSeek = SeekBar(this).apply {
+            max = 0
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(s: SeekBar?, v: Int, u: Boolean) {
+                    if (seekGuard || !u) return
+                    idx = v; armed.clear(); refresh()
+                }
+                override fun onStartTrackingTouch(s: SeekBar?) {
+                    if (mode == Mode.LISTEN) { stopPlayer(); resumeAfterSeek = true }
+                }
+                override fun onStopTrackingTouch(s: SeekBar?) {
+                    if (resumeAfterSeek) { resumeAfterSeek = false; startPlayer(idx) }
+                }
+            })
         }
+        r3.addView(posSeek, grow())
+        cbShowNotes = cb("Ноты в «Вспоминай»") { refresh() }
         r3.addView(cbShowNotes)
         root.addView(r3)
 
-        info = TextView(this).apply { textSize = 14f; setPadding(dp(4), dp(2), dp(4), dp(2)) }
+        info = TextView(this).apply { textSize = 12f; setPadding(dp(4), 0, dp(4), dp(2)) }
         root.addView(info)
 
+        val mid = row()
         staff = StaffView(this)
-        root.addView(staff, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+        staff.onSeek = { setPosition(it) }
+        mid.addView(staff, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f))
+        hands = HandsView(this)
+        hands.visibility = View.GONE
+        mid.addView(hands, LinearLayout.LayoutParams(dp(240), LinearLayout.LayoutParams.MATCH_PARENT))
+        root.addView(mid, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+
         kb = KeyboardView(this)
-        root.addView(kb, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(150)))
+        root.addView(kb, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(120)))
         setContentView(root)
 
         if (!packageManager.hasSystemFeature(PackageManager.FEATURE_MIDI)) {
@@ -226,20 +260,28 @@ class MainActivity : Activity() {
 
     private fun refresh() {
         val st = steps.getOrNull(idx)
-        staff.steps = steps
-        staff.index = idx
-        staff.showFingers = mode != Mode.REMEMBER
-        staff.hideNotes = mode == Mode.REMEMBER && !cbShowNotes.isChecked
-        kb.held = held
-        kb.wrong = wrong
-        kb.targets = when (mode) {
+        val targets: Map<Int, Note> = when (mode) {
             Mode.WATCH -> st?.notes?.associateBy { it.pitch } ?: emptyMap()
             Mode.LISTEN -> playing
             else -> emptyMap()
         }
-        kb.done = if (mode == Mode.WATCH) done else emptySet()
-        kb.showFingers = mode != Mode.REMEMBER
-        staff.invalidate(); kb.invalidate()
+        val fingers = mode != Mode.REMEMBER
+
+        staff.steps = steps
+        staff.index = idx
+        staff.showFingers = fingers
+        staff.hideNotes = mode == Mode.REMEMBER && !cbShowNotes.isChecked
+        staff.held = held
+        staff.wrong = wrong
+        kb.held = held; kb.wrong = wrong; kb.targets = targets; kb.showFingers = fingers
+        hands.targets = targets; hands.showFingers = fingers
+        staff.invalidate(); kb.invalidate(); hands.invalidate()
+
+        val mx = maxOf(0, steps.size - 1)
+        seekGuard = true
+        if (posSeek.max != mx) posSeek.max = mx
+        posSeek.progress = idx
+        seekGuard = false
 
         for ((b, m) in listOf(btnListen to Mode.LISTEN, btnWatch to Mode.WATCH, btnRemember to Mode.REMEMBER)) {
             b.setBackgroundColor(if (mode == m) 0xFF9ADFA8.toInt() else 0xFFDDDDDD.toInt())
@@ -259,22 +301,36 @@ class MainActivity : Activity() {
     private fun startMode(m: Mode) {
         val was = mode
         stopPlayer()
-        held.clear(); wrong.clear(); done.clear()
-        if (was == m) { mode = Mode.NONE; idx = 0; refresh(); return }
+        armed.clear(); wrong.clear()
+        if (was == m) { mode = Mode.NONE; refresh(); return }
         if (steps.isEmpty()) { toast("Сначала загрузите MIDI-файл"); return }
-        mode = m; idx = 0; mistakes = 0
-        if (m == Mode.LISTEN) {
-            player = Player(steps, speed(), { s, a, v -> sendMidi(s, a, v) }, ui,
-                { i, act -> idx = i; playing = act; refresh() },
-                { mode = Mode.NONE; idx = 0; playing = emptyMap(); player = null; refresh() })
-            player?.start()
-        }
+        mode = m
+        mistakes = 0
+        if (idx >= steps.size) idx = 0
+        if (m == Mode.LISTEN) startPlayer(idx)
         refresh()
     }
 
-    private fun stopAll() { stopPlayer(); mode = Mode.NONE; idx = 0; done.clear(); wrong.clear(); refresh() }
+    private fun startPlayer(from: Int) {
+        player?.stop()
+        player = Player(steps, from, speed(), { s, a, v -> sendMidi(s, a, v) }, ui,
+            { i, act -> idx = i; playing = act; refresh() },
+            { mode = Mode.NONE; idx = 0; playing = emptyMap(); player = null; refresh() })
+        player?.start()
+    }
+
+    private fun stopAll() { stopPlayer(); mode = Mode.NONE; armed.clear(); wrong.clear(); refresh() }
 
     private fun stopPlayer() { player?.stop(); player = null; playing = emptyMap() }
+
+    /** Выбор позиции (тап по нотам, ползунок, «В начало»). */
+    private fun setPosition(i: Int) {
+        if (steps.isEmpty()) return
+        idx = i.coerceIn(0, steps.size - 1)
+        armed.clear()
+        if (mode == Mode.LISTEN) { playing = emptyMap(); startPlayer(idx) }
+        refresh()
+    }
 
     private fun rebuild() {
         stopPlayer(); mode = Mode.NONE
@@ -284,12 +340,13 @@ class MainActivity : Activity() {
             else -> notes
         }
         steps = groupSteps(use)
-        idx = 0; mistakes = 0; done.clear(); wrong.clear()
+        idx = 0; mistakes = 0; armed.clear(); wrong.clear()
         refresh()
     }
 
     private fun advance() {
-        idx++; done.clear()
+        idx++
+        armed.clear()   // зажатые клавиши надо отпустить и нажать заново, чтобы они считались для следующего шага
         if (idx >= steps.size) {
             toast("Готово! Ошибок: $mistakes")
             mode = Mode.NONE; idx = 0
@@ -301,21 +358,17 @@ class MainActivity : Activity() {
         val training = mode == Mode.WATCH || mode == Mode.REMEMBER
         val st = if (training) steps.getOrNull(idx) else null
         if (on) {
-            // Три нижние клавиши (21/22/23) выбирают урок, если эта нота не нужна в текущем шаге
-            if (p in 21..23 && (st == null || p !in st.pitches)) {
-                when (p) { 21 -> startMode(Mode.LISTEN); 22 -> startMode(Mode.WATCH); else -> startMode(Mode.REMEMBER) }
-                return
-            }
             held.add(p)
             if (tabletSound) synth.on(p, 90)
             if (st != null) {
-                if (p in st.pitches) {
-                    done.add(p)
-                    if (done.containsAll(st.pitches)) advance()
-                } else { wrong.add(p); mistakes++ }
+                armed.add(p)
+                if (p !in st.pitches) { wrong.add(p); mistakes++ }
+                // шаг засчитывается, когда ВСЕ нужные клавиши зажаты одновременно,
+                // а лишних зажато не больше EXTRA_ALLOWED
+                if (armed.containsAll(st.pitches) && held.count { it !in st.pitches } <= EXTRA_ALLOWED) advance()
             }
         } else {
-            held.remove(p); wrong.remove(p)
+            held.remove(p); wrong.remove(p); armed.remove(p)
             if (tabletSound) synth.off(p)
         }
         refresh()
